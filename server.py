@@ -180,7 +180,5 @@ async def set_color_temp(device_id: str, value: int, code: str = "temp_value_v2"
 
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "10000"))
-    mcp.run(transport="http", host="0.0.0.0", port=port)
-
+    mcp.run(transport="streamable-http")
     
