@@ -5,7 +5,8 @@ import os
 import time
 from typing import Any, Dict, Optional
 
-import os
+import httpx
+from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP(
     "tuya-poke",
