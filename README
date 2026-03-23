@@ -1,0 +1,73 @@
+# Tuya MCP for Poke
+
+A minimal MCP server that lets an MCP client call Tuya Cloud APIs to list devices, read status, and send control commands.
+
+## What you need first
+
+1. A Tuya cloud project with device-control permissions.
+2. Your devices linked to that cloud project.
+3. Your project's `Access ID`, `Access Secret`, and the correct data center / endpoint.
+
+## Files
+
+- `server.py` — MCP server
+- `requirements.txt` — Python dependencies
+- `.env.example` — environment variables template
+
+## Local run
+
+```bash
+python -m venv .venv
+# Windows:
+.venv\Scripts\activate
+# macOS/Linux:
+# source .venv/bin/activate
+
+pip install -r requirements.txt
+```
+
+Create a `.env` file from `.env.example`, then start the server:
+
+```bash
+set TUYA_ACCESS_ID=your_access_id
+set TUYA_ACCESS_SECRET=your_access_secret
+set TUYA_REGION=eu
+python server.py
+```
+
+The MCP endpoint will be:
+
+```text
+http://localhost:8000/mcp
+```
+
+## Deploy quickly on Render / Railway
+
+- Python version: 3.10+
+- Start command:
+
+```bash
+python server.py
+```
+
+- Environment variables:
+  - `TUYA_ACCESS_ID`
+  - `TUYA_ACCESS_SECRET`
+  - `TUYA_REGION`
+
+After deploy, your MCP URL will usually look like:
+
+```text
+https://your-app-name.onrender.com/mcp
+```
+
+## Recommended first tests
+
+1. `list_devices`
+2. `get_device_status(device_id)`
+3. `turn_on(device_id)` or `turn_off(device_id)`
+
+## Important note about switch codes
+
+Many lights use `switch_led`, but some devices use a different function code such as `switch_1`.
+If `turn_on` fails, first call `get_device(device_id)` and inspect the functions/status codes for your exact device.
