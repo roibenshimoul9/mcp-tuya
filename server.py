@@ -5,11 +5,13 @@ import os
 import time
 from typing import Any, Dict, Optional
 
-import httpx
-from mcp.server.fastmcp import FastMCP
+import os
 
-mcp = FastMCP("tuya-poke")
-
+mcp = FastMCP(
+    "tuya-poke",
+    host="0.0.0.0",
+    port=int(os.getenv("PORT", "10000")),
+)
 # Tuya OpenAPI endpoints by data center
 REGION_ENDPOINTS = {
     "eu": "https://openapi.tuyaeu.com",
@@ -177,7 +179,6 @@ async def set_color_temp(device_id: str, value: int, code: str = "temp_value_v2"
         body={"commands": [{"code": code, "value": value}]},
     )
     return json.dumps(data, ensure_ascii=False, indent=2)
-
 
 if __name__ == "__main__":
     mcp.run(transport="streamable-http")
