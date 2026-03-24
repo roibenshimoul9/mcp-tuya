@@ -4,6 +4,7 @@ import json
 import os
 import time
 from typing import Any, Dict, Optional
+from urllib.parse import urlencode
 
 import httpx
 from mcp.server.fastmcp import FastMCP
@@ -13,7 +14,7 @@ mcp = FastMCP(
     host="0.0.0.0",
     port=int(os.getenv("PORT", "10000")),
 )
-# Tuya OpenAPI endpoints by data center
+
 REGION_ENDPOINTS = {
     "eu": "https://openapi.tuyaeu.com",
     "weu": "https://openapi-weaz.tuyaeu.com",
@@ -32,6 +33,10 @@ class TuyaCloud:
         region = os.getenv("TUYA_REGION", "eu").lower().strip()
         self.base_url = os.getenv("TUYA_BASE_URL", REGION_ENDPOINTS.get(region, region)).rstrip("/")
 
+        self._access_token: Optional[str] = None
+        self._refresh_token: Optional[str] = None
+        self._token_expire_at: float = 0
+
     @staticmethod
     def _require(name: str) -> str:
         value = os.getenv(name)
@@ -39,22 +44,118 @@ class TuyaCloud:
             raise RuntimeError(f"Missing required environment variable: {name}")
         return value
 
-    def _sign(self, method: str, path_with_query: str, body: str, timestamp: str) -> str:
-        # Tuya cloud signing for service-to-service calls
-        content_sha256 = hashlib.sha256(body.encode("utf-8")).hexdigest()
-        string_to_sign = "\n".join([
+    @staticmethod
+    def _content_sha256(body: str) -> str:
+        return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+    def _string_to_sign(self, method: str, path_with_query: str, body: str) -> str:
+        return "\n".join([
             method.upper(),
-            content_sha256,
+            self._content_sha256(body),
             "",
             path_with_query,
         ])
+
+    def _sign_token_request(self, method: str, path_with_query: str, body: str, timestamp: str) -> str:
+        string_to_sign = self._string_to_sign(method, path_with_query, body)
         message = f"{self.access_id}{timestamp}{string_to_sign}"
-        signature = hmac.new(
+        return hmac.new(
             self.access_secret.encode("utf-8"),
             msg=message.encode("utf-8"),
             digestmod=hashlib.sha256,
         ).hexdigest().upper()
-        return signature
+
+    def _sign_business_request(
+        self,
+        method: str,
+        path_with_query: str,
+        body: str,
+        timestamp: str,
+        access_token: str,
+    ) -> str:
+        string_to_sign = self._string_to_sign(method, path_with_query, body)
+        message = f"{self.access_id}{access_token}{timestamp}{string_to_sign}"
+        return hmac.new(
+            self.access_secret.encode("utf-8"),
+            msg=message.encode("utf-8"),
+            digestmod=hashlib.sha256,
+        ).hexdigest().upper()
+
+    async def _get_token(self) -> None:
+        path = "/v1.0/token"
+        params = {"grant_type": "1"}
+        body_str = ""
+        path_with_query = f"{path}?grant_type=1"
+        timestamp = str(int(time.time() * 1000))
+
+        headers = {
+            "client_id": self.access_id,
+            "t": timestamp,
+            "sign_method": "HMAC-SHA256",
+            "sign": self._sign_token_request("GET", path_with_query, body_str, timestamp),
+        }
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(
+                f"{self.base_url}{path}",
+                params=params,
+                headers=headers,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        if not data.get("success", False):
+            raise RuntimeError(f"Tuya token error {data.get('code')}: {data.get('msg')}")
+
+        result = data["result"]
+        self._access_token = result["access_token"]
+        self._refresh_token = result.get("refresh_token")
+        expire_time = int(result.get("expire_time", 7200))
+        self._token_expire_at = time.time() + max(60, expire_time - 120)
+
+    async def _refresh_access_token(self) -> None:
+        if not self._refresh_token:
+            await self._get_token()
+            return
+
+        path = f"/v1.0/token/{self._refresh_token}"
+        body_str = ""
+        timestamp = str(int(time.time() * 1000))
+
+        headers = {
+            "client_id": self.access_id,
+            "t": timestamp,
+            "sign_method": "HMAC-SHA256",
+            "sign": self._sign_token_request("GET", path, body_str, timestamp),
+        }
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(f"{self.base_url}{path}", headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+
+        if not data.get("success", False):
+            await self._get_token()
+            return
+
+        result = data["result"]
+        self._access_token = result["access_token"]
+        self._refresh_token = result.get("refresh_token")
+        expire_time = int(result.get("expire_time", 7200))
+        self._token_expire_at = time.time() + max(60, expire_time - 120)
+
+    async def _ensure_token(self) -> str:
+        if self._access_token and time.time() < self._token_expire_at:
+            return self._access_token
+
+        if self._refresh_token:
+            await self._refresh_access_token()
+        else:
+            await self._get_token()
+
+        if not self._access_token:
+            raise RuntimeError("Failed to obtain Tuya access token")
+        return self._access_token
 
     async def request(
         self,
@@ -67,19 +168,20 @@ class TuyaCloud:
         body = body or {}
         body_str = json.dumps(body, separators=(",", ":"), ensure_ascii=False) if body else ""
 
-        query = ""
-        if params:
-            from urllib.parse import urlencode
-            query = urlencode(params)
+        query = urlencode(params) if params else ""
         path_with_query = path if not query else f"{path}?{query}"
 
+        access_token = await self._ensure_token()
         timestamp = str(int(time.time() * 1000))
+
         headers = {
             "client_id": self.access_id,
+            "access_token": access_token,
             "t": timestamp,
             "sign_method": "HMAC-SHA256",
-            "mode": "cors",
-            "sign": self._sign(method, path_with_query, body_str, timestamp),
+            "sign": self._sign_business_request(
+                method, path_with_query, body_str, timestamp, access_token
+            ),
             "Content-Type": "application/json",
         }
 
@@ -95,14 +197,23 @@ class TuyaCloud:
             data = resp.json()
 
         if not data.get("success", False):
-            code = data.get("code", "unknown")
+            code = str(data.get("code", "unknown"))
             msg = data.get("msg", "Unknown Tuya error")
+
+            if code in {"1010", "1011"}:
+                await self._get_token()
+                return await self.request(method, path, params=params, body=body)
+
             raise RuntimeError(f"Tuya API error {code}: {msg}")
+
         return data
 
 
+_tuya_client = TuyaCloud()
+
+
 def client() -> TuyaCloud:
-    return TuyaCloud()
+    return _tuya_client
 
 
 @mcp.tool()
@@ -128,7 +239,7 @@ async def get_device_status(device_id: str) -> str:
 
 @mcp.tool()
 async def send_commands(device_id: str, commands_json: str) -> str:
-    """Send raw Tuya commands to a device. commands_json must be a JSON array like [{\"code\":\"switch_led\",\"value\":true}]"""
+    """Send raw Tuya commands to a device. commands_json must be a JSON array like [{"code":"switch_led","value":true}]"""
     commands = json.loads(commands_json)
     data = await client().request(
         "POST",
@@ -181,6 +292,6 @@ async def set_color_temp(device_id: str, value: int, code: str = "temp_value_v2"
     )
     return json.dumps(data, ensure_ascii=False, indent=2)
 
+
 if __name__ == "__main__":
     mcp.run(transport="streamable-http")
-    
